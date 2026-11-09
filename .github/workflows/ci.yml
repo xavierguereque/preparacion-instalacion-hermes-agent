@@ -1,0 +1,57 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Sintaxis bash
+        run: for f in install.sh scripts/*.sh tests/*.sh; do bash -n "$f"; done
+      - name: ShellCheck
+        run: shellcheck -S warning install.sh scripts/*.sh tests/*.sh
+      - name: Bloques comunes sincronizados
+        run: ./tests/check-common-blocks.sh
+
+  powershell:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: PSScriptAnalyzer
+        shell: pwsh
+        run: |
+          Install-Module PSScriptAnalyzer -Scope CurrentUser -Force
+          $r = Invoke-ScriptAnalyzer scripts/prepare-windows.ps1 -Severity Error
+          $r | Format-Table -AutoSize
+          if ($r) { exit 1 }
+      - name: Diagnóstico en Windows PowerShell 5.1 (-CheckOnly)
+        shell: powershell
+        run: |
+          & ([scriptblock]::Create([IO.File]::ReadAllText("$PWD\scripts\prepare-windows.ps1", [Text.Encoding]::UTF8))) -CheckOnly
+          Write-Host "Diagnóstico ejecutado"
+
+  linux:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        image: ["ubuntu:24.04", "ubuntu:22.04", "debian:12", "fedora:41", "archlinux:latest"]
+    container: ${{ matrix.image }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Primera corrida (instala todo)
+        run: bash scripts/prepare-linux.sh --yes --no-hermes
+      - name: Segunda corrida (todo debe quedar omitido)
+        run: bash scripts/prepare-linux.sh --yes --no-hermes
+
+  macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Diagnóstico
+        # 0 = listo, 1 = faltan cosas; cualquier otro código es un fallo del script
+        run: bash scripts/prepare-macos.sh --check-only || [ $? -eq 1 ]
