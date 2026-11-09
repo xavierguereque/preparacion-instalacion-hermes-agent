@@ -187,7 +187,7 @@ function Write-SystemInfo {
   try { $os = Get-CimInstance Win32_OperatingSystem -ErrorAction Stop; $lines += "SO: $($os.Caption) $($os.Version) build $($os.BuildNumber)" } catch { $lines += "SO: $([Environment]::OSVersion.VersionString)" }
   $lines += "Arquitectura: $($script:Arch) · PowerShell: $($PSVersionTable.PSVersion) $($PSVersionTable.PSEdition)"
   $lines += "Usuario: $env:USERNAME · Admin: $(([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator))"
-  $lines += "Opciones: CheckOnly=$CheckOnly Yes=$Yes NoHermes=$NoHermes · TLS previo: $($script:TlsWasOn)"
+  $lines += "Opciones: CheckOnly=$CheckOnly Yes=$Yes NoHermes=$NoHermes · TLS 1.2 ya activo al iniciar: $($script:TlsWasOn) (se fuerza en la sesión)"
   $lines += "PATH: $env:Path"
   $lines += "--- Estado previo ($StateFile) ---"
   if (Test-Path $StateFile) { $lines += Get-Content $StateFile -Encoding UTF8 } else { $lines += '(sin estado previo)' }
@@ -227,7 +227,6 @@ function Set-State([string]$k, [string]$v) {
 $Reqs = @(
   @{ Id = 'os';        Label = 'Windows';               Req = $true  },
   @{ Id = 'psver';     Label = 'PowerShell';            Req = $true  },
-  @{ Id = 'tls';       Label = 'TLS 1.2';               Req = $true  },
   @{ Id = 'execpol';   Label = 'Política de ejecución'; Req = $true  },
   @{ Id = 'disk';      Label = 'Espacio en disco';      Req = $true  },
   @{ Id = 'net';       Label = 'Conexión a internet';   Req = $true  },
@@ -260,9 +259,6 @@ function Check_psver {
   $v = $PSVersionTable.PSVersion
   if ($v -ge [version]'5.1') { Chk 'ok' "$($v.Major).$($v.Minor)" $PSVersionTable.PSEdition }
   else { Chk 'fail' "$v" 'actualiza a Windows PowerShell 5.1 (WMF 5.1)' }
-}
-function Check_tls {
-  if ($script:TlsWasOn) { Chk 'ok' '' 'ya activo' } else { Chk 'ok' '' 'activado para esta sesión' }
 }
 function Get-EffectivePolicy {
   foreach ($scope in 'MachinePolicy','UserPolicy','CurrentUser','LocalMachine') {
@@ -373,7 +369,6 @@ function Winget-Install([string]$id, [string[]]$extra = @()) {
 
 function Install_os     { return $false }
 function Install_psver  { return $false }
-function Install_tls    { return $true }
 function Install_disk   { return $false }
 function Install_net    { return $false }
 function Install_execpol {
@@ -401,7 +396,7 @@ function Install_longpaths {
          -ArgumentList @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', $cmd) -ErrorAction Stop
   } catch { $script:CM = 'se canceló el permiso de Administrador'; Log "longpaths: $_"; return $false }
   if (Has 'git') { & git config --global core.longpaths true 2>$null }
-  Set-State 'step_longpaths' 'pending_restart'
+  $script:LongPathsSetNow = $true
   return $true
 }
 function Install_vcredist { return (Winget-Install "Microsoft.VCRedist.2015+.$($script:WgArch)") }
@@ -423,14 +418,20 @@ function Install_ffmpeg { return (Winget-Install 'Gyan.FFmpeg') }
 # =============================================================================
 $script:Res = @{}
 
-function Run-Diagnosis([string]$title) {
+$StaticIds = @('os', 'psver', 'disk', 'net')
+
+function Run-Diagnosis([string]$title, [switch]$Reuse) {
   $n = $Reqs.Count
   Show-Section $title "($n verificaciones)"
   for ($i = 0; $i -lt $n; $i++) {
     $r = $Reqs[$i]
     $script:CurPos = $i + 1; $script:CurTotal = $n; $script:CurLabel = $r.Label
     Draw-Progress ($i + 1) $n $SpinFrames[0] $r.Label "revisando$Ellipsis"
-    & ("Check_" + $r.Id)
+    if ($Reuse -and $StaticIds -contains $r.Id -and $script:Res.ContainsKey($r.Id)) {
+      $prev = $script:Res[$r.Id]; Chk $prev.S $prev.V $prev.M
+    } else {
+      & ("Check_" + $r.Id)
+    }
     $script:Res[$r.Id] = @{ S = $script:CS; V = $script:CV; M = $script:CM }
     Show-Row $script:CS $r.Label $script:CV $script:CM
   }
@@ -489,10 +490,10 @@ function Install-Pending {
     if (-not $okInst -and $script:CS -ne 'ok' -and $imsg) { $script:CM = $imsg }
     $script:Res[$r.Id] = @{ S = $script:CS; V = $script:CV; M = $script:CM }
     if ($script:CS -in @('ok','warn')) {
-      if ((Get-State ("step_" + $r.Id)) -ne 'pending_restart') { Set-State ("step_" + $r.Id) 'ok' }
+      Set-State ("step_" + $r.Id) 'ok'
       Show-Row 'done' $r.Label $script:CV 'instalado'
     } else {
-      if ((Get-State ("step_" + $r.Id)) -ne 'pending_restart') { Set-State ("step_" + $r.Id) 'failed' }
+      Set-State ("step_" + $r.Id) 'failed'
       $script:Res[$r.Id].S = 'fail'
       $m = $script:CM; if (-not $m) { $m = 'falló la instalación' }
       Show-Row 'fail' $r.Label $script:CV "$m (ver log)"
@@ -541,7 +542,7 @@ function Main {
     WL ''
     if (-not (Ask-Yes "¿Instalar/actualizar los $pending pendientes?")) { WL '   Cancelado. No se instaló nada.'; Log 'RESULTADO: cancelado'; Show-LogPath; return 0 }
     Install-Pending
-    Run-Diagnosis '2) VERIFICACIÓN FINAL'
+    Run-Diagnosis '2) VERIFICACIÓN FINAL' -Reuse
   } else {
     WL ''; WL "   $G_OK Todo lo necesario ya estaba instalado." 'Green'
   }
@@ -551,8 +552,12 @@ function Main {
   if ($blockers.Count -eq 0) {
     Set-State 'run_status' 'done'
     WL " $G_OK TODO LISTO: el equipo cumple los requisitos de Hermes Agent $G_OK" 'Green'
-    if (((Count-Status 'warn') + (Count-Status 'fail')) -gt 0) { WL '   (Hay avisos en elementos recomendados; no impiden instalar.)' 'DarkGray' }
-    if ((Get-State 'step_longpaths') -eq 'pending_restart') { WL '   Nota: si ves "Filename too long", cierra sesión de Windows y vuelve a entrar.' 'DarkGray' }
+    $rec = @($Reqs | Where-Object { -not $_.Req -and $script:Res[$_.Id].S -ne 'ok' })
+    if ($rec.Count -gt 0) {
+      WL ("   $G_WARN {0} elemento(s) recomendado(s) no quedaron listos; no impiden instalar Hermes:" -f $rec.Count) 'Yellow'
+      foreach ($r in $rec) { WL ("     • {0}: {1}" -f $r.Label, $script:Res[$r.Id].M) }
+    }
+    if ($script:LongPathsSetNow) { WL '   Nota: las rutas largas se activaron ahora; si ves "Filename too long", cierra sesión de Windows y vuelve a entrar.' 'DarkGray' }
     WL ''
     if ($NoHermes) {
       WL "   Para instalar Hermes Agent:  irm $HermesInstallUrl | iex"
@@ -574,6 +579,7 @@ function Main {
   }
 }
 
+$script:LongPathsSetNow = $false
 $script:Finished = $false
 $code = 1
 try {

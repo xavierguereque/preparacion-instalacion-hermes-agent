@@ -204,7 +204,7 @@ state_set() {
 on_interrupt() {
   [ -n "$SPIN_PID" ] && kill "$SPIN_PID" 2>/dev/null
   [ "$IS_TTY" = "1" ] && printf '\033[?25h'; clear_line; echo
-  state_set run_status interrupted
+  [ "$(state_get run_status)" = "running" ] && state_set run_status interrupted
   printf ' %s%s Interrumpido%s en [%s/%s] %s.\n' "$C_YEL" "$G_WARN" "$C_R" "$CUR_POS" "$CUR_TOTAL" "$CUR_LABEL"
   printf '   Vuelve a ejecutar el mismo comando para continuar desde ahí.\n'
   log "RESULTADO: interrumpido en $CUR_LABEL"
@@ -215,7 +215,7 @@ trap on_interrupt INT TERM
 trap '[ "$IS_TTY" = "1" ] && printf "\033[?25h"' EXIT
 
 show_log_path() {
-  printf '\n   %sLog de esta ejecución:%s %s\n' "$C_B" "$C_R" "${LOG_FILE/#$HOME/\~}"
+  printf '\n   %sLog de esta ejecución:%s %s\n' "$C_B" "$C_R" "$(tilde "$LOG_FILE")"
   printf '   %s(si algo falló, comparte este archivo para diagnosticarlo)%s\n\n' "$C_D" "$C_R"
 }
 
@@ -246,6 +246,131 @@ user_rc_file() {
     *)    echo "$HOME/.profile" ;;
   esac
 }
+# --- Rutas legibles: /Users/x/a -> ~/a (funciona igual en bash 3.2 y 5) ---
+tilde() { case "$1" in "$HOME"/*|"$HOME") printf '~%s' "${1#"$HOME"}" ;; *) printf '%s' "$1" ;; esac; }
+
+# --- En macOS sin Xcode CLT, /usr/bin/git y /usr/bin/python3 son "stubs" que
+#     abren la ventana de instalación de Apple: nunca hay que ejecutarlos. ---
+is_apple_stub() {
+  [ "$(uname -s)" = "Darwin" ] || return 1
+  case "$(command -v "$1" 2>/dev/null)" in
+    /usr/bin/*) xcode-select -p >/dev/null 2>&1 && return 1; return 0 ;;
+  esac
+  return 1
+}
+
+# ============================================================================
+#  REVISIONES COMPARTIDAS (macOS y Linux)
+#  Cada check_* deja: CHK_STATUS (ok|update|missing|fail|warn), CHK_VER, CHK_MSG
+# ============================================================================
+chk() { CHK_STATUS="$1"; CHK_VER="$2"; CHK_MSG="$3"; }
+
+check_disk() {
+  local kb gb
+  kb="$(df -Pk "$HOME" | awk 'NR==2{print $4}')"; gb=$(( ${kb:-0} / 1048576 ))
+  if [ "$gb" -lt "$DISK_FAIL_GB" ]; then chk fail "${gb} GB libres" "se necesitan al menos ${DISK_MIN_GB} GB"
+  elif [ "$gb" -lt "$DISK_MIN_GB" ]; then chk warn "${gb} GB libres" "poco espacio; se recomiendan ${DISK_MIN_GB} GB"
+  else chk ok "${gb} GB libres" "suficiente"; fi
+}
+
+net_probe() {
+  if have curl; then curl -sk -o /dev/null --connect-timeout 8 --max-time 12 -I "https://$1" 2>/dev/null
+  elif have wget; then wget -q --no-check-certificate --spider -T 10 "https://$1" 2>/dev/null
+  else timeout 10 bash -c "exec 3<>/dev/tcp/$1/443" 2>/dev/null; fi
+}
+NET_HOSTS="github.com raw.githubusercontent.com hermes-agent.nousresearch.com"
+check_net() {
+  # Las tres pruebas van en paralelo (antes podían sumar ~36 s con red lenta)
+  local okc=0 bad="" h i=0 pids="" d p
+  d="$(mktemp -d 2>/dev/null || echo "$STATE_DIR/net.$$")"; mkdir -p "$d"
+  for h in $NET_HOSTS; do
+    ( net_probe "$h" && : >"$d/ok.$i" ) &
+    pids="$pids $!"; i=$((i+1))
+  done
+  for p in $pids; do wait "$p" 2>/dev/null; done
+  i=0
+  for h in $NET_HOSTS; do
+    if [ -e "$d/ok.$i" ]; then okc=$((okc+1)); else bad="$bad $h"; fi
+    i=$((i+1))
+  done
+  rm -rf "$d"
+  case "$bad" in
+    "") chk ok "3/3 sitios" "github y hermes accesibles" ;;
+    *github*) chk fail "$okc/3 sitios" "sin acceso a:$bad → revisa internet/proxy" ;;
+    *) chk warn "$okc/3 sitios" "sin acceso a:$bad" ;;
+  esac
+}
+
+check_curl() {
+  if have curl; then chk ok "$(curl --version 2>/dev/null | head -1 | first_version)" "ya instalado"; else chk missing "" "se instalará"; fi
+}
+
+check_git() {
+  local v
+  if have git && is_apple_stub git; then chk missing "" "solo existe el stub de Apple (faltan Xcode CLT)"; return; fi
+  if have git && v="$(git --version 2>/dev/null | first_version)" && [ -n "$v" ]; then
+    if ver_ge "$v" "$GIT_MIN"; then chk ok "$v" "ya instalado"; else chk update "$v" "versión menor a $GIT_MIN"; fi
+  else chk missing "" "se instalará"; fi
+}
+
+check_node() {
+  local v major npmv
+  if ! have node; then chk missing "" "se instalará Node.js LTS"; return; fi
+  v="$(node -v 2>/dev/null | first_version)"; major="${v%%.*}"
+  npmv="$(npm -v 2>/dev/null | first_version)"
+  if [ "${major:-0}" -lt "$NODE_MIN" ]; then chk update "$v" "menor a v$NODE_MIN ($(command -v node))"; return; fi
+  if [ -z "$npmv" ]; then chk update "$v" "npm no responde"; return; fi
+  chk ok "$v" "npm $npmv"
+}
+
+best_python() { # imprime "<versión> <binario>" de la mejor versión disponible
+  local best="" bestbin="" c v
+  for c in python3 python3.14 python3.13 python3.12 python3.11; do
+    have "$c" || continue
+    is_apple_stub "$c" && continue
+    v="$("$c" --version 2>&1 | first_version)"; [ -z "$v" ] && continue
+    if [ -z "$best" ] || ! ver_ge "$best" "$v"; then best="$v"; bestbin="$c"; fi
+  done
+  [ -n "$best" ] && echo "$best $bestbin"
+}
+check_python() {
+  local r v
+  r="$(best_python)"; v="${r%% *}"
+  if [ -z "$r" ]; then chk missing "" "se instalará"
+  elif ver_ge "$v" "$PY_MIN"; then chk ok "$v" "${r#* }"
+  else chk update "$v" "versión menor a $PY_MIN"; fi
+}
+
+check_rg()     { if have rg; then chk ok "$(rg --version 2>/dev/null | first_version)" "ya instalado"; else chk missing "" "se instalará"; fi; }
+check_ffmpeg() { if have ffmpeg; then chk ok "$(ffmpeg -version 2>/dev/null | head -1 | first_version)" "ya instalado"; else chk missing "" "se instalará"; fi; }
+check_path() {
+  local rc; rc="$(user_rc_file)"
+  case ":$PATH_AT_START:" in *":$HOME/.local/bin:"*) chk ok "" "ya está en PATH"; return ;; esac
+  if grep -qs '\.local/bin' "$rc"; then chk ok "" "configurado en $(tilde "$rc")"
+  else chk missing "" "se agregará a $(tilde "$rc")"; fi
+}
+
+install_path() {
+  mkdir -p "$HOME/.local/bin"
+  # shellcheck disable=SC2016
+  add_line_once "$(user_rc_file)" 'export PATH="$HOME/.local/bin:$PATH"'
+  export PATH="$HOME/.local/bin:$PATH"
+  PATH_AT_START="$PATH"
+}
+
+prime_sudo() {
+  printf '\n   %s%s%s Algunos pasos necesitan tu contraseña de administrador (sudo).\n' "$C_CYN" "$G_TODO" "$C_R"
+  if [ "$HAS_DEVTTY" = "1" ]; then sudo -v </dev/tty || return 1; else sudo -n -v 2>/dev/null || return 1; fi
+  ( while kill -0 $$ 2>/dev/null; do sudo -n true 2>/dev/null; sleep 50; done ) >/dev/null 2>&1 &
+}
+
+launch_hermes() {
+  local tmp; tmp="$(mktemp)"
+  curl -fsSL "$HERMES_INSTALL_URL" -o "$tmp" || { echo "No se pudo descargar $HERMES_INSTALL_URL"; return 1; }
+  if [ "$HAS_DEVTTY" = "1" ]; then bash "$tmp" </dev/tty; else bash "$tmp"; fi
+  local rc=$?; rm -f "$tmp"; return $rc
+}
+
 # ============================================================================
 #  FIN DEL BLOQUE COMÚN
 # ============================================================================
@@ -277,7 +402,6 @@ REQ_REQUIRED=(1 1 1 1 1 1 1 0 1 1 1 0 0 0 1)
 NODE_MIN=20; NODE_MAJOR_INSTALL=24; PY_MIN=3.11; GIT_MIN=2.25; DISK_MIN_GB=5; DISK_FAIL_GB=3
 PATH_AT_START="$PATH"
 
-chk() { CHK_STATUS="$1"; CHK_VER="$2"; CHK_MSG="$3"; }
 
 check_os() {
   local arch; arch="$(uname -m)"
@@ -295,30 +419,7 @@ check_sudo() {
   else chk fail "" "instala sudo o ejecuta como root"; fi
 }
 
-check_disk() {
-  local kb gb
-  kb="$(df -Pk "$HOME" | awk 'NR==2{print $4}')"; gb=$(( ${kb:-0} / 1048576 ))
-  if [ "$gb" -lt "$DISK_FAIL_GB" ]; then chk fail "${gb} GB libres" "se necesitan al menos ${DISK_MIN_GB} GB"
-  elif [ "$gb" -lt "$DISK_MIN_GB" ]; then chk warn "${gb} GB libres" "poco espacio; se recomiendan ${DISK_MIN_GB} GB"
-  else chk ok "${gb} GB libres" "suficiente"; fi
-}
 
-net_probe() {
-  if have curl; then curl -sk -o /dev/null --connect-timeout 8 --max-time 12 -I "https://$1" 2>/dev/null
-  elif have wget; then wget -q --no-check-certificate --spider -T 10 "https://$1" 2>/dev/null
-  else timeout 10 bash -c "exec 3<>/dev/tcp/$1/443" 2>/dev/null; fi
-}
-check_net() {
-  local okc=0 bad=""
-  for h in github.com raw.githubusercontent.com hermes-agent.nousresearch.com; do
-    if net_probe "$h"; then okc=$((okc+1)); else bad="$bad $h"; fi
-  done
-  case "$bad" in
-    "") chk ok "3/3 sitios" "github y hermes accesibles" ;;
-    *github*) chk fail "$okc/3 sitios" "sin acceso a:$bad → revisa internet/proxy" ;;
-    *) chk warn "$okc/3 sitios" "sin acceso a:$bad" ;;
-  esac
-}
 
 ca_bundle() { for f in /etc/ssl/certs/ca-certificates.crt /etc/pki/tls/certs/ca-bundle.crt /etc/ssl/cert.pem; do [ -s "$f" ] && return 0; done; return 1; }
 BASE_MISSING=""
@@ -331,16 +432,7 @@ check_base() {
   else chk missing "" "faltan:$BASE_MISSING"; fi
 }
 
-check_curl() {
-  if have curl; then chk ok "$(curl --version 2>/dev/null | head -1 | first_version)" "ya instalado"; else chk missing "" "se instalará"; fi
-}
 
-check_git() {
-  local v
-  if have git && v="$(git --version 2>/dev/null | first_version)" && [ -n "$v" ]; then
-    if ver_ge "$v" "$GIT_MIN"; then chk ok "$v" "ya instalado"; else chk update "$v" "versión menor a $GIT_MIN"; fi
-  else chk missing "" "se instalará"; fi
-}
 
 check_build() {
   local miss="" c
@@ -356,41 +448,8 @@ has_lib() {
 check_libatomic() { if has_lib libatomic.so.1; then chk ok "" "requerida por Node.js"; else chk missing "" "requerida por Node.js; se instalará"; fi; }
 check_libstdcxx() { if has_lib libstdc++.so.6; then chk ok "" "requerida por Node.js"; else chk missing "" "requerida por Node.js; se instalará"; fi; }
 
-check_node() {
-  local v major npmv
-  if ! have node; then chk missing "" "se instalará Node.js LTS"; return; fi
-  v="$(node -v 2>/dev/null | first_version)"; major="${v%%.*}"
-  npmv="$(npm -v 2>/dev/null | first_version)"
-  if [ "${major:-0}" -lt "$NODE_MIN" ]; then chk update "$v" "menor a v$NODE_MIN ($(command -v node))"; return; fi
-  if [ -z "$npmv" ]; then chk update "$v" "npm no responde"; return; fi
-  chk ok "$v" "npm $npmv"
-}
 
-best_python() {
-  local best="" bestbin="" c v
-  for c in python3 python3.14 python3.13 python3.12 python3.11; do
-    have "$c" || continue
-    v="$("$c" --version 2>&1 | first_version)"; [ -z "$v" ] && continue
-    if [ -z "$best" ] || ! ver_ge "$best" "$v"; then best="$v"; bestbin="$c"; fi
-  done
-  [ -n "$best" ] && echo "$best $bestbin"
-}
-check_python() {
-  local r v
-  r="$(best_python)"; v="${r%% *}"
-  if [ -z "$r" ]; then chk missing "" "se instalará"
-  elif ver_ge "$v" "$PY_MIN"; then chk ok "$v" "${r#* }"
-  else chk update "$v" "versión menor a $PY_MIN"; fi
-}
 
-check_rg()     { if have rg; then chk ok "$(rg --version 2>/dev/null | first_version)" "ya instalado"; else chk missing "" "se instalará"; fi; }
-check_ffmpeg() { if have ffmpeg; then chk ok "$(ffmpeg -version 2>/dev/null | head -1 | first_version)" "ya instalado"; else chk missing "" "se instalará"; fi; }
-check_path() {
-  local rc; rc="$(user_rc_file)"
-  case ":$PATH_AT_START:" in *":$HOME/.local/bin:"*) chk ok "" "ya está en PATH"; return ;; esac
-  if grep -qs '\.local/bin' "$rc"; then chk ok "" "configurado en ${rc/#$HOME/\~}"
-  else chk missing "" "se agregará a ${rc/#$HOME/\~}"; fi
-}
 
 # ----------------------------------------------------------------------------
 #  Instaladores
@@ -447,6 +506,19 @@ install_build() {
 install_libatomic() { case "$PM" in apt) pkg libatomic1 ;; dnf) pkg libatomic ;; pacman) pkg gcc-libs ;; esac; }
 install_libstdcxx() { case "$PM" in apt) pkg libstdc++6 ;; dnf) pkg libstdc++ ;; pacman) pkg gcc-libs ;; esac; }
 
+# Ubuntu/Debian empaquetan nodejs + npm + libnode*; el nodejs de NodeSource choca
+# con ellos ("Conflicts: npm"). Se quitan solo si el Node instalado no es de NodeSource.
+remove_distro_node() {
+  local v pkgs
+  v="$(dpkg-query -W -f='${Version}' nodejs 2>/dev/null)"
+  [ -z "$v" ] && return 0
+  case "$v" in *nodesource*) return 0 ;; esac
+  pkgs="$(dpkg-query -W -f='${db:Status-Abbrev} ${Package}\n' nodejs npm 'libnode*' 2>/dev/null | awk '$1 ~ /^ii/ {print $2}' | tr '\n' ' ')"
+  [ -z "$pkgs" ] && return 0
+  # shellcheck disable=SC2086
+  spin "quitando Node $v de la distro" $SUDO env DEBIAN_FRONTEND=noninteractive apt-get remove -y $pkgs
+}
+
 nodesource() { # nodesource deb|rpm
   local tmp; tmp="$(mktemp)"
   have curl || pkg curl
@@ -457,6 +529,7 @@ nodesource() { # nodesource deb|rpm
 install_node() {
   case "$PM" in
     apt)
+      remove_distro_node
       nodesource deb || return 1
       spin "apt install nodejs" $SUDO env DEBIAN_FRONTEND=noninteractive apt-get install -y nodejs ;;
     dnf)
@@ -491,30 +564,12 @@ install_ffmpeg() {
     *)   pkg ffmpeg ;;
   esac
 }
-install_path() {
-  mkdir -p "$HOME/.local/bin"
-  # shellcheck disable=SC2016
-  add_line_once "$(user_rc_file)" 'export PATH="$HOME/.local/bin:$PATH"'
-  export PATH="$HOME/.local/bin:$PATH"
-  PATH_AT_START="$PATH"
-}
 install_os()   { return 1; }
 install_sudo() { return 1; }
 install_disk() { return 1; }
 install_net()  { return 1; }
 
-prime_sudo() {
-  printf '\n   %s%s%s Algunos pasos necesitan tu contraseña de administrador (sudo).\n' "$C_CYN" "$G_TODO" "$C_R"
-  if [ "$HAS_DEVTTY" = "1" ]; then sudo -v </dev/tty || return 1; else sudo -n -v 2>/dev/null || return 1; fi
-  ( while kill -0 $$ 2>/dev/null; do sudo -n true 2>/dev/null; sleep 50; done ) >/dev/null 2>&1 &
-}
 
-launch_hermes() {
-  local tmp; tmp="$(mktemp)"
-  curl -fsSL "$HERMES_INSTALL_URL" -o "$tmp" || { echo "No se pudo descargar $HERMES_INSTALL_URL"; return 1; }
-  if [ "$HAS_DEVTTY" = "1" ]; then bash "$tmp" </dev/tty; else bash "$tmp"; fi
-  local rc=$?; rm -f "$tmp"; return $rc
-}
 
 # ============================================================================
 #  MOTOR COMÚN (diagnóstico → instalación → verificación)
@@ -522,14 +577,20 @@ launch_hermes() {
 # ============================================================================
 RES_STATUS=(); RES_VER=(); RES_MSG=()
 
-run_diagnosis() { # run_diagnosis "<título>"
+# Revisiones que la instalación no puede cambiar: en la verificación final se reutilizan.
+STATIC_IDS=" os sudo disk net "
+
+run_diagnosis() { # run_diagnosis "<título>" [reuse]
   local n=${#REQ_IDS[@]} i id
   ui_section "$1" "($n verificaciones)"
   for ((i=0; i<n; i++)); do
     id="${REQ_IDS[$i]}"
     CUR_POS=$((i+1)); CUR_TOTAL=$n; CUR_LABEL="${REQ_LABELS[$i]}"
     draw_progress "$CUR_POS" "$n" "${SPIN_ARR[0]}" "$CUR_LABEL" "revisando…"
-    "check_$id"
+    case "${2:-}:$STATIC_IDS" in
+      reuse:*" $id "*) CHK_STATUS="${RES_STATUS[$i]}"; CHK_VER="${RES_VER[$i]}"; CHK_MSG="${RES_MSG[$i]}" ;;
+      *) "check_$id" ;;
+    esac
     RES_STATUS[$i]="$CHK_STATUS"; RES_VER[$i]="$CHK_VER"; RES_MSG[$i]="$CHK_MSG"
     ui_row "$CHK_STATUS" "${REQ_LABELS[$i]}" "$CHK_VER" "$CHK_MSG"
   done
@@ -537,6 +598,14 @@ run_diagnosis() { # run_diagnosis "<título>"
 }
 
 count_status() { local s="$1" c=0 x; for x in "${RES_STATUS[@]}"; do [ "$x" = "$s" ] && c=$((c+1)); done; echo $c; }
+
+recommended_issues() { # cuántos recomendados no quedaron listos
+  local i c=0 n=${#REQ_IDS[@]}
+  for ((i=0; i<n; i++)); do
+    [ "${REQ_REQUIRED[$i]}" = "0" ] && [ "${RES_STATUS[$i]}" != "ok" ] && c=$((c+1))
+  done
+  echo $c
+}
 
 blocking_fails() { # imprime índices obligatorios que no están ok/warn
   local i n=${#REQ_IDS[@]}
@@ -621,7 +690,7 @@ main() {
   printf '===== %s · hermes-prep %s · %s =====\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$PREP_VERSION" "$PLATFORM_NAME" >>"$LOG_FILE"
   log_system_info
   ui_banner "Preparación para Hermes Agent · $PLATFORM_NAME $(uname -m)"
-  printf '   %sv%s · log: %s%s\n' "$C_D" "$PREP_VERSION" "${LOG_FILE/#$HOME/\~}" "$C_R"
+  printf '   %sv%s · log: %s%s\n' "$C_D" "$PREP_VERSION" "$(tilde "$LOG_FILE")" "$C_R"
 
   show_resume_notice
   run_diagnosis "1) DIAGNÓSTICO"
@@ -648,7 +717,7 @@ main() {
     echo
     if ! ask_yes "¿Instalar/actualizar los $pending pendientes?"; then echo "   Cancelado. No se instaló nada."; log "RESULTADO: cancelado"; show_log_path; exit 0; fi
     install_pending
-    run_diagnosis "2) VERIFICACIÓN FINAL"
+    run_diagnosis "2) VERIFICACIÓN FINAL" reuse
   else
     echo; printf '   %s%s Todo lo necesario ya estaba instalado.%s\n' "$C_GRN" "$G_OK" "$C_R"
   fi
@@ -658,7 +727,13 @@ main() {
   if [ -z "$blockers" ]; then
     state_set run_status "done"
     printf ' %s%s %s TODO LISTO: el equipo cumple los requisitos de Hermes Agent %s%s\n' "$C_GRN" "$C_B" "$G_OK" "$G_OK" "$C_R"
-    [ "$(count_status warn)$(count_status fail)" != "00" ] && printf '   %s(Hay avisos en elementos recomendados; no impiden instalar.)%s\n' "$C_D" "$C_R"
+    local rec; rec="$(recommended_issues)"
+    if [ "$rec" -gt 0 ]; then
+      printf '   %s%s %d elemento(s) recomendado(s) no quedaron listos; no impiden instalar Hermes:%s\n' "$C_YEL" "$G_WARN" "$rec" "$C_R"
+      for ((i=0; i<${#REQ_IDS[@]}; i++)); do
+        [ "${REQ_REQUIRED[$i]}" = "0" ] && [ "${RES_STATUS[$i]}" != "ok" ] && printf '     • %s: %s\n' "${REQ_LABELS[$i]}" "${RES_MSG[$i]}"
+      done
+    fi
     echo
     if [ "$NO_HERMES" = "1" ]; then
       echo "   Para instalar Hermes Agent:  curl -fsSL $HERMES_INSTALL_URL | bash"
@@ -668,7 +743,7 @@ main() {
     else
       echo "   Cuando quieras:  curl -fsSL $HERMES_INSTALL_URL | bash"
     fi
-    echo "   Abre una terminal nueva (o ejecuta: source $(user_rc_file | sed "s|$HOME|~|")) para cargar el PATH."
+    echo "   Abre una terminal nueva (o ejecuta: source $(tilde "$(user_rc_file)")) para cargar el PATH."
     log "RESULTADO: todo listo"; show_log_path
     exit 0
   else

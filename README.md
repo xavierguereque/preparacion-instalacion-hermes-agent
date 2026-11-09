@@ -145,7 +145,7 @@ Probado en Ubuntu 24.04, Fedora 41 y Arch Linux. También funciona en WSL2.
 |---|---|---|
 | Windows 10 1809+ x64/ARM64 | Verifica (32 bits no soportado) | Obligatorio |
 | PowerShell 5.1+ | Verifica | Obligatorio |
-| TLS 1.2 | Lo activa en la sesión | Obligatorio |
+| TLS 1.2 | Se activa automáticamente al iniciar (queda anotado en el log) | — |
 | Política de ejecución | `RemoteSigned` para tu usuario (si estaba `Restricted`) | Obligatorio |
 | Espacio en disco y conexión | Verifica | Obligatorio |
 | winget | Registra *App Installer*; si no, indica cómo instalarlo de la Store | Obligatorio |

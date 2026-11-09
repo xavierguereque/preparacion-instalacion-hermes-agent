@@ -10,10 +10,11 @@ setlocal
 set "PS1=%~dp0..\scripts\prepare-windows.ps1"
 set "URL=https://raw.githubusercontent.com/xavierguereque/preparacion-instalacion-hermes-agent/main/scripts/prepare-windows.ps1"
 
+rem La ruta viaja en la variable PS1 y no dentro de comillas: soporta carpetas con apostrofo
 if exist "%PS1%" (
-  powershell -NoProfile -ExecutionPolicy Bypass -Command "& ([scriptblock]::Create([IO.File]::ReadAllText('%PS1%', [Text.Encoding]::UTF8))) %*"
+  powershell -NoProfile -ExecutionPolicy Bypass -Command "& ([scriptblock]::Create([IO.File]::ReadAllText($env:PS1, [Text.Encoding]::UTF8))) %*"
 ) else (
-  powershell -NoProfile -ExecutionPolicy Bypass -Command "[Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor 3072; & ([scriptblock]::Create((Invoke-RestMethod '%URL%'))) %*"
+  powershell -NoProfile -ExecutionPolicy Bypass -Command "[Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor 3072; & ([scriptblock]::Create((Invoke-RestMethod $env:URL))) %*"
 )
 
 echo.
