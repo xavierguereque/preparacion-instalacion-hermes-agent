@@ -10,7 +10,7 @@
 #  Compatible con bash 3.2 (el que trae macOS).
 # =============================================================================
 
-PREP_VERSION="1.0.1"
+PREP_VERSION="1.0.2"
 PLATFORM_NAME="macOS"
 HERMES_INSTALL_URL="https://hermes-agent.nousresearch.com/install.sh"
 
@@ -393,8 +393,33 @@ hermes_failure_kind() {
   [ -f "$HERMES_LOG" ] || { echo unknown; return; }
   if tail -n "+$1" "$HERMES_LOG" 2>/dev/null | grep -Eqi "$HERMES_NET_RE"; then echo net; else echo other; fi
 }
+# Carpeta donde el instalador oficial deja el código (mismas variables que él usa).
+HERMES_DIR="${HERMES_INSTALL_DIR:-${HERMES_HOME:-$HOME/.hermes}/hermes-agent}"
+# Si esa carpeta existe pero no es un clon de git usable (p. ej. quedó de un intento manual con
+# el .tar.gz o de un clon cortado), el instalador oficial se detiene: "exists and is not a Hermes
+# git checkout". Se borra, con confirmación, para que pueda clonar de nuevo.
+clean_broken_hermes_dir() {
+  [ -e "$HERMES_DIR" ] || return 0
+  if [ -L "$HERMES_DIR" ]; then
+    printf ' %s%s %s es un enlace simbólico; no se toca.%s\n' "$C_YEL" "$G_WARN" "$(tilde "$HERMES_DIR")" "$C_R"; return 0
+  fi
+  [ -d "$HERMES_DIR/.git" ] && git -C "$HERMES_DIR" rev-parse --verify HEAD >/dev/null 2>&1 && return 0
+  [ -d "$HERMES_DIR" ] && [ -z "$(ls -A "$HERMES_DIR" 2>/dev/null)" ] && return 0
+  echo
+  printf ' %s%s %s existe pero no es una instalación válida de Hermes%s (sin clon de git usable).\n' \
+    "$C_YEL" "$G_WARN" "$(tilde "$HERMES_DIR")" "$C_R"
+  printf '   Quedó de un intento anterior y el instalador oficial no puede continuar con ella.\n'
+  if ! ask_yes "¿Borrarla para instalar Hermes desde cero?"; then
+    printf '   No se borró. Hazlo a mano con:  rm -rf %s\n' "$(tilde "$HERMES_DIR")"; return 1
+  fi
+  log "HERMES: se borra carpeta inválida $HERMES_DIR"
+  rm -rf "$HERMES_DIR" || { printf '   %s%s No se pudo borrar %s.%s\n' "$C_RED" "$G_ERR" "$(tilde "$HERMES_DIR")" "$C_R"; return 1; }
+  printf '   %s%s Borrada.%s\n' "$C_GRN" "$G_OK" "$C_R"
+}
 launch_hermes() {
-  local tmp rc attempt=1 from kind=""; tmp="$(mktemp)"
+  local tmp rc attempt=1 from kind=""
+  clean_broken_hermes_dir || return 1
+  tmp="$(mktemp)"
   curl -fsSL "$HERMES_INSTALL_URL" -o "$tmp" || { echo "No se pudo descargar $HERMES_INSTALL_URL"; rm -f "$tmp"; return 1; }
   while :; do
     log "HERMES: intento $attempt de $HERMES_TRIES"

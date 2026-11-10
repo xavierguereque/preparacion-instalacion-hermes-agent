@@ -67,6 +67,7 @@ Los scripts aseguran lo que el instalador oficial **da por hecho** (git, curl, l
   1. Diagnóstico falso de "falta Node/Python/FFmpeg": la terminal no tenía `/opt/homebrew/bin` en el PATH. v1.0.1 carga `brew shellenv` antes del diagnóstico.
   2. Al actualizar a macOS 27 e instalar Xcode.app, la licencia de Xcode sin aceptar bloqueó `/usr/bin/git` y todo `brew`. v1.0.1 lo detecta (`xcodebuild -license check`) en el paso Xcode y pide aceptarla.
   3. El instalador oficial falló al clonar (`curl 56 Connection reset`): fue la red. v1.0.1 lee el log del instalador oficial y, solo si fue un corte de red, ofrece reintentos con HTTP/1.1 (solo para ese proceso, vía `GIT_CONFIG_*`).
+  4. Un intento manual (bajar el `.tar.gz` de `main` + `git init`) dejó `~/.hermes/hermes-agent` sin un clon usable y el instalador oficial se negó a continuar ("exists and is not a Hermes git checkout"). v1.0.2 borra esa carpeta, con confirmación, antes de lanzarlo. Lección: el instalador necesita un clon real de git; el `.tar.gz` no sirve.
 
 ## Pendientes / ideas
 
