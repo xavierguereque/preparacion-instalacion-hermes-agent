@@ -110,7 +110,7 @@ pero si falla solo deja un aviso (el instalador de Hermes también puede proveer
 | macOS / arquitectura | 13+ recomendado | — | Obligatorio |
 | Espacio en disco | 5 GB | — | Obligatorio |
 | Conexión a GitHub y Hermes | — | — | Obligatorio |
-| Xcode Command Line Tools | — | `softwareupdate` (o ventana de Apple) | Obligatorio |
+| Xcode Command Line Tools | — | `softwareupdate` (o ventana de Apple); si Xcode.app está activo y falta su licencia, pide aceptarla (`sudo xcodebuild -license accept`) | Obligatorio |
 | Homebrew | — | instalador oficial + `brew shellenv` en `~/.zprofile` | Obligatorio |
 | Git | 2.25 | viene con Xcode CLT, si no `brew install git` | Obligatorio |
 | curl | — | `brew install curl` | Obligatorio |
@@ -206,6 +206,9 @@ script falla o se interrumpe.
 |---|---|
 | `Sin acceso a github.com` | Revisa internet, proxy corporativo o antivirus que intercepte HTTPS. |
 | macOS: se abrió una ventana de Apple y el script terminó | Termina la instalación de Xcode CLT y vuelve a ejecutar: continúa ahí. |
+| macOS: `You have not agreed to the Xcode license` (Git falla, `brew` no responde) | Pasa al actualizar macOS o instalar Xcode.app. Desde v1.0.1 el script lo detecta en el paso Xcode y pide aceptar la licencia; a mano: `sudo xcodebuild -license accept`. |
+| macOS: Node/Python/FFmpeg salen como "falta" justo después de instalarlos | La terminal no había cargado `~/.zprofile`. Corregido en v1.0.1 (el diagnóstico carga Homebrew); si usas una versión vieja, abre una terminal nueva. |
+| Hermes: `RPC failed; curl 56 … Connection reset by peer` / `early EOF` al clonar | Corte de red durante la descarga del repo de Hermes; no es un requisito faltante. El script ofrece 2 reintentos con HTTP/1.1. Si persiste: usa otra red o cable y ejecuta `git config --global http.version HTTP/1.1` antes de reintentar. |
 | Node "menor a v20" aunque se instaló | Hay otro Node antes en el PATH (p. ej. `nvm`). Ejecuta `nvm install --lts` o quita la versión vieja. |
 | Windows: "fijada por directiva de grupo" | La política de ejecución la controla TI; pide `RemoteSigned`. |
 | Windows: `winget` no aparece | Instala **App Installer** desde Microsoft Store y vuelve a ejecutar. |

@@ -3,7 +3,7 @@ tags:
   - hermes-agent
   - instalacion
   - requisitos
-fecha_modificacion: 2026-11-09
+fecha_modificacion: 2026-11-10
 estado: activo
 ---
 
@@ -60,6 +60,13 @@ Los scripts aseguran lo que el instalador oficial **da por hecho** (git, curl, l
 - **Obligatorio vs. recomendado**: Python, ripgrep, FFmpeg, compiladores y VC++ son recomendados porque el gestor de Hermes también puede proveerlos; si fallan, se avisa sin bloquear.
 - **Bash 3.2** (macOS) y **PowerShell 5.1** como mínimos.
 - **Log por ejecución en Descargas** (`hermes-prep-logs/hermes-prep-AAAAMMDD-HHMMSS.log`): un archivo nuevo por corrida, fácil de encontrar y compartir cuando algo falla. Incluye sistema, estado previo, cada fila, salida completa de instaladores y resultado. Si Descargas no es escribible, cae a `~/.hermes-prep/`.
+
+## Fallos vistos en campo
+
+- **2026-11-10 · MacBook Air (macOS 26.5 → 27.2) · v1.0.0** — cinco corridas, tres causas:
+  1. Diagnóstico falso de "falta Node/Python/FFmpeg": la terminal no tenía `/opt/homebrew/bin` en el PATH. v1.0.1 carga `brew shellenv` antes del diagnóstico.
+  2. Al actualizar a macOS 27 e instalar Xcode.app, la licencia de Xcode sin aceptar bloqueó `/usr/bin/git` y todo `brew`. v1.0.1 lo detecta (`xcodebuild -license check`) en el paso Xcode y pide aceptarla.
+  3. El instalador oficial falló al clonar (`curl 56 Connection reset`): fue la red. v1.0.1 ofrece reintentos con HTTP/1.1 (solo para ese proceso, vía `GIT_CONFIG_*`).
 
 ## Pendientes / ideas
 
