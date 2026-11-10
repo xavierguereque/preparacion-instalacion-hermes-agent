@@ -206,9 +206,9 @@ script falla o se interrumpe.
 |---|---|
 | `Sin acceso a github.com` | Revisa internet, proxy corporativo o antivirus que intercepte HTTPS. |
 | macOS: se abrió una ventana de Apple y el script terminó | Termina la instalación de Xcode CLT y vuelve a ejecutar: continúa ahí. |
-| macOS: `You have not agreed to the Xcode license` (Git falla, `brew` no responde) | Pasa al actualizar macOS o instalar Xcode.app. Desde v1.0.1 el script lo detecta en el paso Xcode y pide aceptar la licencia; a mano: `sudo xcodebuild -license accept`. |
+| macOS: `You have not agreed to the Xcode license` (Git falla, `brew` no responde) | Pasa al actualizar macOS o instalar Xcode.app. Desde v1.0.1 el script lo detecta en el paso Xcode y pregunta si aceptas la licencia (siempre con un "sí" explícito, aunque uses `--yes`); a mano: `sudo xcodebuild -license accept`. |
 | macOS: Node/Python/FFmpeg salen como "falta" justo después de instalarlos | La terminal no había cargado `~/.zprofile`. Corregido en v1.0.1 (el diagnóstico carga Homebrew); si usas una versión vieja, abre una terminal nueva. |
-| Hermes: `RPC failed; curl 56 … Connection reset by peer` / `early EOF` al clonar | Corte de red durante la descarga del repo de Hermes; no es un requisito faltante. El script ofrece 2 reintentos con HTTP/1.1. Si persiste: usa otra red o cable y ejecuta `git config --global http.version HTTP/1.1` antes de reintentar. |
+| Hermes: `RPC failed; curl 56 … Connection reset by peer` / `early EOF` al clonar | Corte de red durante la descarga del repo de Hermes; no es un requisito faltante. Si el log del instalador (`~/.hermes/logs/install.log`) muestra un corte de red, el script ofrece hasta 2 reintentos con HTTP/1.1; si la falla es de otro tipo, no reintenta y te indica ese log. Si persiste: usa otra red o cable y ejecuta `git config --global http.version HTTP/1.1` antes de reintentar. |
 | Node "menor a v20" aunque se instaló | Hay otro Node antes en el PATH (p. ej. `nvm`). Ejecuta `nvm install --lts` o quita la versión vieja. |
 | Windows: "fijada por directiva de grupo" | La política de ejecución la controla TI; pide `RemoteSigned`. |
 | Windows: `winget` no aparece | Instala **App Installer** desde Microsoft Store y vuelve a ejecutar. |

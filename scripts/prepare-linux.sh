@@ -192,6 +192,10 @@ ver_ge() { # ver_ge 3.12.1 3.11  -> 0 si a >= b
     for(i=1;i<=k;i++){p=x[i]+0;q=y[i]+0;if(p>q)exit 0;if(p<q)exit 1}exit 0}'
 }
 first_version() { grep -oE '[0-9]+(\.[0-9]+)+' | head -1; }
+# Recorta stdin a N bytes sin dejar un carácter UTF-8 partido (cut -c en macOS cuenta bytes).
+short_text() {
+  if have iconv; then cut -c1-"$1" | iconv -c -f UTF-8 -t UTF-8 2>/dev/null; else cut -c1-"$1"; fi
+}
 have() { command -v "$1" >/dev/null 2>&1; }
 
 # --- Estado persistente (key=value) ---
@@ -313,12 +317,13 @@ check_curl() {
 check_git() {
   local v
   if have git && is_apple_stub git; then chk missing "" "solo existe el stub de Apple (faltan Xcode CLT)"; return; fi
-  if have git && ! git --version >/dev/null 2>&1 && git --version 2>&1 | grep -qi license; then
-    chk missing "" "bloqueado por la licencia de Xcode (se acepta en el paso Xcode)"; return
-  fi
-  if have git && v="$(git --version 2>/dev/null | first_version)" && [ -n "$v" ]; then
-    if ver_ge "$v" "$GIT_MIN"; then chk ok "$v" "ya instalado"; else chk update "$v" "versión menor a $GIT_MIN"; fi
-  else chk missing "" "se instalará"; fi
+  if ! have git; then chk missing "" "se instalará"; return; fi
+  local out rc; out="$(git --version 2>&1)"; rc=$?
+  # git existe pero no responde (en macOS: licencia de Xcode sin aceptar): muestra su propio error.
+  if [ $rc -ne 0 ]; then chk missing "" "git no responde: $(printf '%s' "$out" | head -1 | short_text 50)"; return; fi
+  v="$(printf '%s' "$out" | first_version)"
+  if [ -z "$v" ]; then chk missing "" "se instalará"
+  elif ver_ge "$v" "$GIT_MIN"; then chk ok "$v" "ya instalado"; else chk update "$v" "versión menor a $GIT_MIN"; fi
 }
 
 check_node() {
@@ -380,18 +385,34 @@ run_hermes_installer() { # run_hermes_installer <script> <intento>
   [ "$2" -gt 1 ] && pre=(env GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=http.version GIT_CONFIG_VALUE_0=HTTP/1.1)
   if [ "$HAS_DEVTTY" = "1" ]; then ${pre[@]+"${pre[@]}"} bash "$1" </dev/tty; else ${pre[@]+"${pre[@]}"} bash "$1"; fi
 }
+HERMES_LOG="${HERMES_HOME:-$HOME/.hermes}/logs/install.log"
+HERMES_NET_RE='Connection reset|early EOF|RPC failed|curl [0-9]+|unexpected disconnect|timed out|Could not resolve host|SSL_ERROR|gnutls_handshake'
+# ¿Por qué falló el instalador? Lee lo que escribió en su log desde la línea $1.
+#   net = corte de red (vale la pena reintentar) · other = otra causa · unknown = sin log
+hermes_failure_kind() {
+  [ -f "$HERMES_LOG" ] || { echo unknown; return; }
+  if tail -n "+$1" "$HERMES_LOG" 2>/dev/null | grep -Eqi "$HERMES_NET_RE"; then echo net; else echo other; fi
+}
 launch_hermes() {
-  local tmp rc attempt=1; tmp="$(mktemp)"
+  local tmp rc attempt=1 from kind=""; tmp="$(mktemp)"
   curl -fsSL "$HERMES_INSTALL_URL" -o "$tmp" || { echo "No se pudo descargar $HERMES_INSTALL_URL"; rm -f "$tmp"; return 1; }
   while :; do
     log "HERMES: intento $attempt de $HERMES_TRIES"
+    from=1; [ -f "$HERMES_LOG" ] && from=$(( $(wc -l <"$HERMES_LOG") + 1 ))
     run_hermes_installer "$tmp" "$attempt"; rc=$?
-    log "HERMES: RC=$rc"
-    [ $rc -eq 0 ] && break
+    [ $rc -eq 0 ] && { log "HERMES: RC=0"; break; }
+    kind="$(hermes_failure_kind "$from")"
+    log "HERMES: RC=$rc causa=$kind"
+    # Ctrl+C, una falla que no es de red o el último intento: no tiene sentido repetir.
+    [ $rc -eq 130 ] && break
+    [ "$kind" = "other" ] && break
     [ $attempt -ge $HERMES_TRIES ] && break
     echo
-    printf ' %s%s El instalador de Hermes falló (código %s).%s\n' "$C_YEL" "$G_WARN" "$rc" "$C_R"
-    printf '   Si el error dice "Connection reset", "early EOF" o "RPC failed", fue un corte de red: reintentar suele bastar.\n'
+    if [ "$kind" = "net" ]; then
+      printf ' %s%s El instalador de Hermes se cortó por la red%s (código %s); reintentar suele bastar.\n' "$C_YEL" "$G_WARN" "$C_R" "$rc"
+    else
+      printf ' %s%s El instalador de Hermes falló (código %s)%s y no se pudo leer su log para saber por qué.\n' "$C_YEL" "$G_WARN" "$rc" "$C_R"
+    fi
     attempt=$((attempt+1))
     ask_yes "¿Reintentar (intento $attempt de $HERMES_TRIES, con HTTP/1.1)?" || break
   done
@@ -399,8 +420,12 @@ launch_hermes() {
   if [ $rc -ne 0 ]; then
     echo
     printf ' %s%s Hermes Agent no se pudo instalar.%s Los requisitos sí quedaron listos.\n' "$C_RED" "$G_ERR" "$C_R"
-    printf '   Prueba con otra red (o cable) y vuelve a ejecutar:  curl -fsSL %s | bash\n' "$HERMES_INSTALL_URL"
-    printf '   Si se repite el corte, ejecuta antes:  git config --global http.version HTTP/1.1\n'
+    if [ "$kind" = "net" ]; then
+      printf '   Fue un corte de red. Prueba con otra red (o cable) y vuelve a ejecutar:  curl -fsSL %s | bash\n' "$HERMES_INSTALL_URL"
+      printf '   Si se repite, ejecuta antes:  git config --global http.version HTTP/1.1\n'
+    elif [ "$kind" = "other" ]; then
+      printf '   Revisa el log del instalador oficial: %s\n' "$(tilde "$HERMES_LOG")"
+    fi
   fi
   return $rc
 }
@@ -672,11 +697,16 @@ show_resume_notice() {
   printf '   Continuando desde ahí: lo que ya se instaló se omitirá.\n'
 }
 
-# Primera línea de error que dejó un paso en el log (desde la línea $1), para mostrar la causa real.
+# Mensaje de un paso que falló. step_error <línea-inicial-del-log> <estado> <mensaje-del-check>
+#  - "update": el check explica qué sigue mal (p. ej. otro Node antes en el PATH) → se conserva.
+#  - si no, la primera línea de error que dejó el paso en el log (la causa real);
+#  - si no hay, el mensaje del check salvo que sea el genérico de diagnóstico ("se instalará…").
 step_error() {
   local e
-  e="$(tail -n "+$1" "$LOG_FILE" 2>/dev/null | grep -m1 -E '^(Error|error|E|fatal):' | cut -c1-70)"
-  if [ -n "$e" ]; then printf 'falló: %s' "$e"; else printf 'falló la instalación'; fi
+  [ "$2" = "update" ] && [ -n "$3" ] && { printf '%s' "$3"; return; }
+  e="$(tail -n "+$1" "$LOG_FILE" 2>/dev/null | grep -m1 -E '^(Error|error|E|fatal):' | short_text 70)"
+  if [ -n "$e" ]; then printf 'falló: %s' "$e"; return; fi
+  case "$3" in ""|"se "*) printf 'falló la instalación' ;; *) printf '%s' "$3" ;; esac
 }
 
 install_pending() {
@@ -712,7 +742,7 @@ install_pending() {
     fi
 
     CHK_MSG=""; local log_from; log_from=$(( $(wc -l <"$LOG_FILE") + 1 ))
-    if "install_$id"; then "check_$id"; else local imsg="$CHK_MSG"; "check_$id"; [ "$CHK_STATUS" != "ok" ] && CHK_MSG="${imsg:-$(step_error "$log_from")}"; fi
+    if "install_$id"; then "check_$id"; else local imsg="$CHK_MSG"; "check_$id"; [ "$CHK_STATUS" != "ok" ] && CHK_MSG="${imsg:-$(step_error "$log_from" "$CHK_STATUS" "$CHK_MSG")}"; fi
     RES_STATUS[$i]="$CHK_STATUS"; RES_VER[$i]="$CHK_VER"; RES_MSG[$i]="$CHK_MSG"
     if [ "$CHK_STATUS" = "ok" ] || [ "$CHK_STATUS" = "warn" ]; then
       state_set "step_$id" ok
@@ -781,7 +811,10 @@ main() {
     if [ "$NO_HERMES" = "1" ]; then
       echo "   Para instalar Hermes Agent:  curl -fsSL $HERMES_INSTALL_URL | bash"
     elif ask_yes "¿Instalar Hermes Agent ahora?"; then
-      if ! launch_hermes; then log "RESULTADO: requisitos listos, falló el instalador de Hermes"; show_log_path; exit 1; fi
+      if ! launch_hermes; then
+        echo "   Abre una terminal nueva (o ejecuta: source $(tilde "$(user_rc_file)")) para cargar el PATH."
+        log "RESULTADO: requisitos listos, falló el instalador de Hermes"; show_log_path; exit 1
+      fi
       printf '\n   %sAbre una terminal nueva para que el comando %shermes%s%s quede disponible.%s\n' "$C_D" "$C_B" "$C_R" "$C_D" "$C_R"
     else
       echo "   Cuando quieras:  curl -fsSL $HERMES_INSTALL_URL | bash"
